@@ -1,105 +1,160 @@
-import fs from 'fs';
+import Database from 'better-sqlite3';
 import path from 'path';
+import fs from 'fs';
 
-const DATA_FILE = path.join(process.cwd(), 'data', 'tasks.json');
+const DB_PATH = path.join(process.cwd(), 'data', 'hermes.db');
 
-interface Task {
+// Ensure data directory exists
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+
+const db = new Database(DB_PATH);
+
+// Initialize tables
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    poster_id TEXT NOT NULL,
+    description TEXT NOT NULL,
+    budget REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    acceptor_id TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    completion_proof TEXT,
+    rating INTEGER,
+    category TEXT,
+    estimated_minutes INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS reputation (
+    agent_id TEXT PRIMARY KEY,
+    completed_tasks INTEGER DEFAULT 0,
+    total_rating INTEGER DEFAULT 0,
+    average_rating REAL DEFAULT 0
+  );
+`);
+
+// Prepared statements
+const insertTask = db.prepare(`
+  INSERT INTO tasks (id, poster_id, description, budget, status, created_at, category, estimated_minutes)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const getTaskById = db.prepare('SELECT * FROM tasks WHERE id = ?');
+const getAllOpenTasks = db.prepare("SELECT * FROM tasks WHERE status = 'open'");
+const updateTaskStatus = db.prepare('UPDATE tasks SET status = ?, acceptor_id = ? WHERE id = ?');
+const completeTaskStmt = db.prepare('UPDATE tasks SET status = ?, completed_at = ?, completion_proof = ? WHERE id = ?');
+const rateTaskStmt = db.prepare('UPDATE tasks SET rating = ? WHERE id = ?');
+
+const getReputationStmt = db.prepare('SELECT * FROM reputation WHERE agent_id = ?');
+const upsertReputation = db.prepare(`
+  INSERT INTO reputation (agent_id, completed_tasks, total_rating, average_rating)
+  VALUES (?, 1, ?, ?)
+  ON CONFLICT(agent_id) DO UPDATE SET
+    completed_tasks = completed_tasks + 1,
+    total_rating = total_rating + excluded.total_rating,
+    average_rating = (total_rating + excluded.total_rating) / (completed_tasks + 1)
+`);
+
+const getTasksByUserStmt = db.prepare(`
+  SELECT * FROM tasks WHERE poster_id = ? OR acceptor_id = ?
+`);
+
+// Types
+export interface Task {
   id: string;
-  posterId: string;
+  poster_id: string;
   description: string;
-  budget: number; // in USDC
+  budget: number;
   status: 'open' | 'accepted' | 'completed' | 'cancelled';
-  acceptorId?: string;
-  createdAt: string;
-  completedAt?: string;
-  completionProof?: string;
-  rating?: number; // 1-5
+  acceptor_id?: string;
+  created_at: string;
+  completed_at?: string;
+  completion_proof?: string;
+  rating?: number;
+  category?: string;
+  estimated_minutes?: number;
 }
 
-let tasks: Record<string, Task> = {};
-let initialized = false;
-
-function load() {
-  if (initialized) return;
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      const data = fs.readFileSync(DATA_FILE, 'utf-8');
-      tasks = JSON.parse(data);
-    }
-  } catch (e) {
-    console.error('Failed to load tasks', e);
-  }
-  initialized = true;
+export interface Reputation {
+  completed_tasks: number;
+  average_rating: number;
 }
 
-function save() {
-  try {
-    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify(tasks, null, 2));
-  } catch (e) {
-    console.error('Failed to save tasks', e);
-  }
-}
-
-export function getAllTasks(): Task[] {
-  load();
-  return Object.values(tasks);
-}
-
-export function getTask(id: string): Task | undefined {
-  load();
-  return tasks[id];
-}
-
-export function createTask(posterId: string, description: string, budget: number): Task {
-  load();
+// Public API
+export function createTask(
+  posterId: string,
+  description: string,
+  budget: number,
+  category?: string,
+  estimatedMinutes?: number
+): Task {
   const id = 'task_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
-  const task: Task = {
+  const createdAt = new Date().toISOString();
+
+  insertTask.run(
     id,
     posterId,
     description,
     budget,
-    status: 'open',
-    createdAt: new Date().toISOString(),
-  };
-  tasks[id] = task;
-  save();
-  return task;
+    'open',
+    createdAt,
+    category || null,
+    estimatedMinutes || null
+  );
+
+  return getTaskById.get(id) as Task;
+}
+
+export function getTask(id: string): Task | undefined {
+  return getTaskById.get(id) as Task | undefined;
+}
+
+export function getAllTasks(): Task[] {
+  return getAllOpenTasks.all() as Task[];
 }
 
 export function acceptTask(taskId: string, acceptorId: string): Task | null {
-  load();
-  const task = tasks[taskId];
+  const task = getTaskById.get(taskId) as Task | undefined;
   if (!task || task.status !== 'open') return null;
-  task.status = 'accepted';
-  task.acceptorId = acceptorId;
-  save();
-  return task;
+
+  updateTaskStatus.run('accepted', acceptorId, taskId);
+  return getTaskById.get(taskId) as Task;
 }
 
 export function completeTask(taskId: string, proof: string): Task | null {
-  load();
-  const task = tasks[taskId];
+  const task = getTaskById.get(taskId) as Task | undefined;
   if (!task || task.status !== 'accepted') return null;
-  task.status = 'completed';
-  task.completedAt = new Date().toISOString();
-  task.completionProof = proof;
-  save();
-  return task;
+
+  const completedAt = new Date().toISOString();
+  completeTaskStmt.run('completed', completedAt, proof, taskId);
+  return getTaskById.get(taskId) as Task;
 }
 
 export function rateTask(taskId: string, rating: number): Task | null {
-  load();
-  const task = tasks[taskId];
-  if (!task || task.status !== 'completed' || !task.rating) {
-    if (task) task.rating = rating;
-    save();
-    return task;
+  const task = getTaskById.get(taskId) as Task | undefined;
+  if (!task || task.status !== 'completed') return null;
+
+  rateTaskStmt.run(rating, taskId);
+
+  if (task.acceptor_id) {
+    upsertReputation.run(task.acceptor_id, rating, rating);
   }
-  return null;
+
+  return getTaskById.get(taskId) as Task;
 }
 
 export function getTasksByUser(userId: string): Task[] {
-  load();
-  return Object.values(tasks).filter(t => t.posterId === userId || t.acceptorId === userId);
+  return getTasksByUserStmt.all(userId, userId) as Task[];
+}
+
+export function getReputation(agentId: string): Reputation {
+  const row = getReputationStmt.get(agentId) as any;
+  if (!row) {
+    return { completed_tasks: 0, average_rating: 0 };
+  }
+  return {
+    completed_tasks: row.completed_tasks,
+    average_rating: row.average_rating,
+  };
 }
