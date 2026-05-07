@@ -1,0 +1,22 @@
+{
+  "name": "hermes-coord",
+  "version": "0.4.0",
+  "description": "Hermes - Agent coordination and task marketplace via MCP + x402",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^11.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
