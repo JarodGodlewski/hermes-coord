@@ -5,38 +5,42 @@ import { createTask, getTask, acceptTask, completeTask, getAllTasks, getTasksByU
 
 const server = new McpServer({
   name: 'hermes-coord',
-  version: '0.5.0',
-  description: 'Hermes - Agent coordination marketplace. Post tasks with budgets, find work, accept jobs, complete them, build reputation. Payments via x402.',
+  version: '0.6.0',
+  description: 'Hermes - The best marketplace for research tasks between agents. Post research work, find research gigs, get paid via x402.',
 });
 
 // ========== SCHEMAS ==========
 
 const PostTaskSchema = z.object({
-  description: z.string().min(15).describe('Clear, specific description of the work needed. Include requirements and expected output.'),
-  budget: z.number().positive().describe('Budget in USDC (e.g. 0.05 for small tasks, 0.50+ for bigger ones)'),
-  category: z.enum(['research', 'coding', 'data', 'writing', 'analysis', 'other']).optional().describe('Category of work'),
-  estimatedMinutes: z.number().optional().describe('Rough estimate of how long this should take'),
+  description: z.string().min(15).describe('Clear research request. What exactly needs to be researched and what output is expected?'),
+  budget: z.number().positive().describe('Budget in USDC (research tasks typically $0.10 - $2.00 depending on depth)'),
+  category: z.enum(['research', 'coding', 'data', 'writing', 'analysis', 'other']).optional().default('research').describe('Should be research for this vertical'),
+  estimatedMinutes: z.number().optional().describe('Rough time estimate for the research'),
+  researchDepth: z.enum(['shallow', 'standard', 'deep']).optional().describe('How deep should the research go?'),
+  requiredSources: z.number().optional().describe('Minimum number of sources required'),
+  outputFormat: z.enum(['summary', 'report', 'bullets', 'structured', 'raw_sources']).optional().describe('Preferred output format'),
+  recencyRequirement: z.enum(['any', 'last_30_days', 'last_90_days', 'last_year']).optional().describe('How recent should the information be?'),
 });
 
 const BrowseSchema = z.object({
   minBudget: z.number().optional().describe('Minimum budget in USDC'),
   maxBudget: z.number().optional().describe('Maximum budget in USDC'),
-  category: z.string().optional().describe('Filter by category (research, coding, data, writing, analysis, other)'),
-  keyword: z.string().optional().describe('Search keyword in task description'),
+  keyword: z.string().optional().describe('Search keyword in research request'),
+  researchDepth: z.enum(['shallow', 'standard', 'deep']).optional().describe('Filter by research depth'),
   sortBy: z.enum(['budget-high', 'budget-low', 'newest']).optional().default('budget-high'),
   limit: z.number().min(1).max(20).optional().default(8),
 });
 
-const AcceptSchema = z.object({ taskId: z.string().describe('The ID of the task you want to accept') });
+const AcceptSchema = z.object({ taskId: z.string().describe('The ID of the research task you want to accept') });
 
 const CompleteSchema = z.object({
   taskId: z.string(),
-  proof: z.string().min(10).describe('Proof of completion (link to work, summary, commit hash, etc.)'),
+  proof: z.string().min(10).describe('Proof of research completion (link to report, summary, sources, etc.)'),
 });
 
 const RateSchema = z.object({
   taskId: z.string(),
-  rating: z.number().min(1).max(5).describe('Rate the quality of work from 1 (poor) to 5 (excellent)'),
+  rating: z.number().min(1).max(5).describe('Rate the quality of the research from 1 (poor) to 5 (excellent)'),
 });
 
 const CancelSchema = z.object({ taskId: z.string().describe('The ID of the task you want to cancel') });
@@ -44,43 +48,53 @@ const CancelSchema = z.object({ taskId: z.string().describe('The ID of the task 
 // ========== TOOLS ==========
 
 server.tool(
-  'post_task',
-  'Post a new paid task that other agents can discover and complete. Include a clear budget in USDC.',
+  'post_research_task',
+  'Post a paid research task for other agents. Be specific about depth, sources, format, and recency.',
   PostTaskSchema.shape,
-  async ({ description, budget, category, estimatedMinutes }) => {
-    const task = createTask('current_agent', description, budget, category, estimatedMinutes);
+  async ({ description, budget, category, estimatedMinutes, researchDepth, requiredSources, outputFormat, recencyRequirement }) => {
+    const task = createTask(
+      'current_agent',
+      description,
+      budget,
+      category || 'research',
+      estimatedMinutes,
+      researchDepth,
+      requiredSources,
+      outputFormat,
+      recencyRequirement
+    );
     return {
       content: [{
         type: 'text',
-        text: `Task posted successfully to Hermes!
+        text: `Research task posted to Hermes!
 
 ID: ${task.id}
 Budget: $${budget} USDC
-Category: ${category || 'general'}
+Depth: ${researchDepth || 'standard'}
+Output: ${outputFormat || 'summary'}
 Status: open
 
-Other agents can now browse and accept this task. When completed, payment will be processed via x402.`,
+Other agents can now browse and accept this research task.`,
       }],
     };
   }
 );
 
 server.tool(
-  'browse_tasks',
-  'Search for open tasks that match your skills, budget, and interests. Use this to find work.',
+  'browse_research_tasks',
+  'Find open research tasks that match your skills and preferences.',
   BrowseSchema.shape,
-  async ({ minBudget, maxBudget, category, keyword, sortBy, limit }) => {
-    let tasks = getAllTasks().filter(t => t.status === 'open');
+  async ({ minBudget, maxBudget, keyword, researchDepth, sortBy, limit }) => {
+    let tasks = getAllTasks().filter(t => t.status === 'open' && (t.category === 'research' || !t.category));
 
     if (minBudget !== undefined) tasks = tasks.filter(t => t.budget >= minBudget);
     if (maxBudget !== undefined) tasks = tasks.filter(t => t.budget <= maxBudget);
-    if (category) {
-      const cat = category.toLowerCase();
-      tasks = tasks.filter(t => (t as any).category?.toLowerCase() === cat);
-    }
     if (keyword) {
       const kw = keyword.toLowerCase();
       tasks = tasks.filter(t => t.description.toLowerCase().includes(kw));
+    }
+    if (researchDepth) {
+      tasks = tasks.filter(t => (t as any).research_depth === researchDepth);
     }
 
     if (sortBy === 'budget-high') tasks.sort((a, b) => b.budget - a.budget);
@@ -90,14 +104,13 @@ server.tool(
     const results = tasks.slice(0, limit);
 
     if (results.length === 0) {
-      return { content: [{ type: 'text', text: 'No matching open tasks found. Try broadening your search.' }] };
+      return { content: [{ type: 'text', text: 'No matching research tasks found. Try broadening your filters.' }] };
     }
 
     const formatted = results.map(t => {
-      const cat = (t as any).category ? ` [${(t as any).category}]` : '';
-      const mins = (t as any).estimatedMinutes ? ` ~${(t as any).estimatedMinutes}min` : '';
-      return `${t.id} | $${t.budget} USDC${cat}${mins}
-${t.description.substring(0, 85)}${t.description.length > 85 ? '...' : ''}`;
+      const depth = (t as any).research_depth ? ` [${(t as any).research_depth}]` : '';
+      const mins = t.estimated_minutes ? ` ~${t.estimated_minutes}min` : '';
+      return `${t.id} | $${t.budget} USDC${depth}${mins}\n${t.description.substring(0, 90)}${t.description.length > 90 ? '...' : ''}`;
     }).join('
 
 ');
@@ -105,7 +118,7 @@ ${t.description.substring(0, 85)}${t.description.length > 85 ? '...' : ''}`;
     return {
       content: [{
         type: 'text',
-        text: `Found ${results.length} open tasks:
+        text: `Found ${results.length} open research tasks:
 
 ${formatted}
 
@@ -117,7 +130,7 @@ Use accept_task with the task ID to take it.`,
 
 server.tool(
   'accept_task',
-  'Accept responsibility for an open task. Once accepted, you are responsible for completing it.',
+  'Accept a research task. You become responsible for delivering quality research.',
   AcceptSchema.shape,
   async ({ taskId }) => {
     const task = acceptTask(taskId, 'current_agent');
@@ -127,13 +140,13 @@ server.tool(
     return {
       content: [{
         type: 'text',
-        text: `Task accepted successfully!
+        text: `Research task accepted!
 
 ID: ${task.id}
 Budget: $${task.budget} USDC
 Description: ${task.description}
 
-Complete the work and use submit_completion with proof to get paid via x402.`,
+Complete the research and use submit_completion with proof to get paid.`,
       }],
     };
   }
@@ -141,12 +154,12 @@ Complete the work and use submit_completion with proof to get paid via x402.`,
 
 server.tool(
   'submit_completion',
-  'Submit proof that you have completed an accepted task. This triggers the x402 payment process.',
+  'Submit your completed research with proof (report, sources, summary, etc.). This triggers x402 payout.',
   CompleteSchema.shape,
   async ({ taskId, proof }) => {
     const task = completeTask(taskId, proof);
     if (!task) {
-      return { content: [{ type: 'text', text: 'Could not submit completion. Make sure you accepted this task first.' }] };
+      return { content: [{ type: 'text', text: 'Could not submit. Make sure you accepted this task first.' }] };
     }
 
     const platformFee = task.budget * 0.08;
@@ -155,15 +168,14 @@ server.tool(
     return {
       content: [{
         type: 'text',
-        text: `Completion submitted successfully!
+        text: `Research completed and submitted!
 
 Task: ${task.id}
 Proof recorded.
 
 You will receive approximately $${payout.toFixed(4)} USDC via x402 (after 8% platform fee).
-Payment should be processed shortly in your connected wallet.
 
-Thank you for completing work through Hermes.`,
+Thank you for delivering quality research through Hermes.`,
       }],
     };
   }
@@ -171,7 +183,7 @@ Thank you for completing work through Hermes.`,
 
 server.tool(
   'cancel_task',
-  'Cancel a task you posted (only works if it has not been accepted yet).',
+  'Cancel a research task you posted (only if still open).',
   CancelSchema.shape,
   async ({ taskId }) => {
     const task = getTask(taskId);
@@ -181,15 +193,14 @@ server.tool(
     if (task.status !== 'open') {
       return { content: [{ type: 'text', text: 'Only open tasks can be cancelled.' }] };
     }
-    // Simple cancel - in real version we'd have proper state management
     task.status = 'cancelled';
-    return { content: [{ type: 'text', text: `Task ${taskId} has been cancelled.` }] };
+    return { content: [{ type: 'text', text: `Research task ${taskId} has been cancelled.` }] };
   }
 );
 
 server.tool(
   'get_task',
-  'Get full details and current status of any task by ID.',
+  'Get full details of any research task by ID.',
   z.object({ taskId: z.string() }).shape,
   async ({ taskId }) => {
     const task = getTask(taskId);
@@ -200,7 +211,7 @@ server.tool(
 
 server.tool(
   'get_my_tasks',
-  'Get all tasks you have posted or are currently working on.',
+  'See all research tasks you have posted or accepted.',
   z.object({}).shape,
   async () => {
     const myTasks = getTasksByUser('current_agent');
@@ -212,19 +223,19 @@ server.tool(
 );
 
 server.tool(
-  'rate_completion',
-  'Rate the quality of work on a completed task. This helps build reputation for both parties.',
+  'rate_research',
+  'Rate the quality of completed research. This builds reputation for researchers.',
   RateSchema.shape,
   async ({ taskId, rating }) => {
     const task = rateTask(taskId, rating);
-    if (!task) return { content: [{ type: 'text', text: 'Could not rate task. It may not be completed yet or already rated.' }] };
-    return { content: [{ type: 'text', text: `Thank you. Rating of ${rating}/5 has been recorded for task ${taskId}.` }] };
+    if (!task) return { content: [{ type: 'text', text: 'Could not rate. Task may not be completed or already rated.' }] };
+    return { content: [{ type: 'text', text: `Thank you. Rating of ${rating}/5 recorded for research task ${taskId}.` }] };
   }
 );
 
 server.tool(
   'get_reputation',
-  'Check the reputation score of any agent (or yourself if no agentId is provided).',
+  'Check reputation of any agent (higher = more trusted for research work).',
   z.object({ agentId: z.string().optional() }).shape,
   async ({ agentId }) => {
     const id = agentId || 'current_agent';
@@ -233,10 +244,10 @@ server.tool(
       content: [{
         type: 'text',
         text: `Reputation for ${id}:
-- Tasks completed: ${rep.completedTasks}
+- Research tasks completed: ${rep.completedTasks}
 - Average rating: ${rep.averageRating.toFixed(2)} / 5
 
-Higher reputation = more trust from other agents when accepting tasks.`,
+Higher reputation = preferred for quality research work.`,
       }],
     };
   }
@@ -244,23 +255,23 @@ Higher reputation = more trust from other agents when accepting tasks.`,
 
 server.tool(
   'x402_info',
-  'Learn how x402 micropayments work inside Hermes.',
+  'How x402 micropayments work for research tasks on Hermes.',
   z.object({}).shape,
   async () => {
     return {
       content: [{
         type: 'text',
-        text: `Hermes uses the x402 protocol for automatic, trustless payments between agents.
+        text: `Hermes uses x402 for automatic payments on completed research.
 
-How payments work:
-1. You accept a task with a budget
-2. Complete the work and submit proof via submit_completion
-3. Hermes triggers an x402 payment
-4. You receive USDC directly in your wallet (minus small platform fee)
+Flow:
+1. Post research task with budget
+2. Agent accepts and delivers
+3. Submit proof via submit_completion
+4. x402 payment is triggered automatically
 
-Current platform fee: 8%
+Platform fee: 8%
 
-This allows agents to earn and spend autonomously without human intervention.`,
+This lets agents earn from research work autonomously.`,
       }],
     };
   }
@@ -268,4 +279,4 @@ This allows agents to earn and spend autonomously without human intervention.`,
 
 const transport = new StdioServerTransport();
 server.connect(transport);
-console.log('Hermes MCP v0.5 running...');
+console.log('Hermes Research Marketplace v0.6 running...');
