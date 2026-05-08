@@ -4,12 +4,11 @@ import fs from 'fs';
 
 const DB_PATH = path.join(process.cwd(), 'data', 'hermes.db');
 
-// Ensure data directory exists
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
 const db = new Database(DB_PATH);
 
-// Initialize tables
+// Initialize tables with research-specific fields
 db.exec(`
   CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
@@ -23,7 +22,12 @@ db.exec(`
     completion_proof TEXT,
     rating INTEGER,
     category TEXT,
-    estimated_minutes INTEGER
+    estimated_minutes INTEGER,
+    -- Research-specific fields
+    research_depth TEXT,
+    required_sources INTEGER,
+    output_format TEXT,
+    recency_requirement TEXT
   );
 
   CREATE TABLE IF NOT EXISTS reputation (
@@ -36,8 +40,10 @@ db.exec(`
 
 // Prepared statements
 const insertTask = db.prepare(`
-  INSERT INTO tasks (id, poster_id, description, budget, status, created_at, category, estimated_minutes)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO tasks (
+    id, poster_id, description, budget, status, created_at,
+    category, estimated_minutes, research_depth, required_sources, output_format, recency_requirement
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const getTaskById = db.prepare('SELECT * FROM tasks WHERE id = ?');
@@ -74,6 +80,11 @@ export interface Task {
   rating?: number;
   category?: string;
   estimated_minutes?: number;
+  // Research-specific
+  research_depth?: string;
+  required_sources?: number;
+  output_format?: string;
+  recency_requirement?: string;
 }
 
 export interface Reputation {
@@ -87,7 +98,11 @@ export function createTask(
   description: string,
   budget: number,
   category?: string,
-  estimatedMinutes?: number
+  estimatedMinutes?: number,
+  researchDepth?: string,
+  requiredSources?: number,
+  outputFormat?: string,
+  recencyRequirement?: string
 ): Task {
   const id = 'task_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
   const createdAt = new Date().toISOString();
@@ -100,7 +115,11 @@ export function createTask(
     'open',
     createdAt,
     category || null,
-    estimatedMinutes || null
+    estimatedMinutes || null,
+    researchDepth || null,
+    requiredSources || null,
+    outputFormat || null,
+    recencyRequirement || null
   );
 
   return getTaskById.get(id) as Task;
